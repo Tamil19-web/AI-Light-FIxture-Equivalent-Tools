@@ -1,4 +1,7 @@
 streamlit==1.26.0
 pandas
 numpy
-pillow
+Pillow
+scikit-learn
+torch
+open_clip_torch
