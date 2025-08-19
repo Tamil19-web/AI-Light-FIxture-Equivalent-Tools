@@ -1,0 +1,7 @@
+streamlit==1.26.0
+pandas
+torch
+open_clip_torch
+faiss-cpu
+Pillow
+numpy
