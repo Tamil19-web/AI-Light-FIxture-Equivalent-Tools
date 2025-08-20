@@ -12,7 +12,7 @@ import base64
 # ---------------------------
 # Setup
 # ---------------------------
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cpu"  # Force CPU for Streamlit Cloud
 
 # Load OpenCLIP model
 model, _, preprocess = open_clip.create_model_and_transforms(
@@ -72,7 +72,7 @@ st.sidebar.header("Search Options")
 search_mode = st.sidebar.radio(
     "Search Mode",
     ["Image Search Only", "Filters + Image Search"],
-    index=0  # default mode
+    index=0
 )
 
 uploaded_file = st.sidebar.file_uploader("Upload Site Image", type=["jpg", "png"])
@@ -81,13 +81,11 @@ uploaded_file = st.sidebar.file_uploader("Upload Site Image", type=["jpg", "png"
 if search_mode == "Filters + Image Search":
     st.sidebar.subheader("Filter Options")
     
-    # Existing site fixture details
     site_lamp_type = st.sidebar.text_input("Lamp Type (e.g., T8 2x32W)")
     site_wattage = st.sidebar.number_input("Total Wattage", min_value=0)
     site_lumens = st.sidebar.number_input("Total Lumens", min_value=0)
     site_qty = st.sidebar.number_input("Quantity", min_value=1, value=1)
 
-    # Database filters
     fixture_types = df['FixtureType'].unique().tolist()
     selected_fixture_type = st.sidebar.selectbox("Select Fixture Type", fixture_types)
 
