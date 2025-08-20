@@ -1,69 +1,21 @@
 # app.py
 import streamlit as st
 import pandas as pd
-import torch
-import open_clip
-from PIL import Image
 import numpy as np
-import faiss
-import os
-import base64
+from PIL import Image
 
 # ---------------------------
 # Setup
 # ---------------------------
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-# Load OpenCLIP model
-model, _, preprocess = open_clip.create_model_and_transforms(
-    'ViT-B-32',
-    pretrained='laion2b_s34b_b79k'
-)
-model = model.to(device)
-model.eval()
-
-# Load database
-df = pd.read_csv("luminaire_database.csv")
-
 st.set_page_config(layout="wide")
-st.title("💡 AI Luminaire Matching Tool (Exact Fixture Type & Visual Match)")
+st.title("💡 AI Luminaire Matching Tool (Precomputed Features & URL Images)")
 
-# ---------------------------
-# Feature Cache
-# ---------------------------
-feature_cache = {}
+# Load CSV with precomputed features
+df = pd.read_csv("luminaire_database_with_features.csv")
 
-def get_feature(img_path):
-    if img_path in feature_cache:
-        return feature_cache[img_path]
-    if os.path.exists(img_path):
-        image = preprocess(Image.open(img_path).convert("RGB")).unsqueeze(0).to(device)
-        with torch.no_grad():
-            feature = model.encode_image(image)
-            feature = feature / feature.norm(dim=-1, keepdim=True)
-        feat_np = feature.cpu().numpy().astype("float32")
-        feature_cache[img_path] = feat_np
-        return feat_np
-    else:
-        zero_feat = np.zeros((1, model.visual.output_dim), dtype="float32")
-        feature_cache[img_path] = zero_feat
-        return zero_feat
-
-def extract_features(df_filtered):
-    feats = [get_feature(path) for path in df_filtered['ImagePath']]
-    return np.vstack(feats).astype('float32')
-
-def search_top_matches(site_image, df_filtered, features, k):
-    site_feat = preprocess(site_image.convert("RGB")).unsqueeze(0).to(device)
-    with torch.no_grad():
-        site_feat = model.encode_image(site_feat)
-        site_feat = site_feat / site_feat.norm(dim=-1, keepdim=True)
-    site_feat_np = site_feat.cpu().numpy().astype('float32')
-
-    index = faiss.IndexFlatIP(features.shape[1])
-    index.add(features)
-    D, I = index.search(site_feat_np, k=k)
-    return I[0], D[0]
+# Extract feature matrix
+feature_cols = [c for c in df.columns if c.startswith("feat_")]
+features = df[feature_cols].values.astype("float32")
 
 # ---------------------------
 # Sidebar
@@ -72,22 +24,19 @@ st.sidebar.header("Search Options")
 search_mode = st.sidebar.radio(
     "Search Mode",
     ["Image Search Only", "Filters + Image Search"],
-    index=0  # default mode
+    index=0
 )
 
 uploaded_file = st.sidebar.file_uploader("Upload Site Image", type=["jpg", "png"])
 
-# Filters (only used if second mode is selected)
+# Filters
 if search_mode == "Filters + Image Search":
     st.sidebar.subheader("Filter Options")
-    
-    # Existing site fixture details
     site_lamp_type = st.sidebar.text_input("Lamp Type (e.g., T8 2x32W)")
     site_wattage = st.sidebar.number_input("Total Wattage", min_value=0)
     site_lumens = st.sidebar.number_input("Total Lumens", min_value=0)
     site_qty = st.sidebar.number_input("Quantity", min_value=1, value=1)
 
-    # Database filters
     fixture_types = df['FixtureType'].unique().tolist()
     selected_fixture_type = st.sidebar.selectbox("Select Fixture Type", fixture_types)
 
@@ -107,16 +56,6 @@ else:
     site_lumens = st.sidebar.number_input("Total Lumens (optional)", min_value=0)
     site_qty = st.sidebar.number_input("Quantity (optional)", min_value=1, value=1)
     top_k = st.sidebar.slider("Number of Matches to Show", 1, 5, 3)
-
-# ---------------------------
-# Base64 image helper
-# ---------------------------
-def image_to_base64(path):
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            data = f.read()
-        return base64.b64encode(data).decode()
-    return None
 
 # ---------------------------
 # Lumens to LED Equivalent
@@ -146,6 +85,36 @@ def proposed_action(site_watt, eq_watt):
         return "N/A"
 
 # ---------------------------
+# Numpy cosine similarity search
+# ---------------------------
+def search_top_matches(site_feat, features, k):
+    cosine_sim = np.dot(features, site_feat.T).flatten()
+    top_idx = np.argsort(-cosine_sim)[:k]
+    top_scores = cosine_sim[top_idx]
+    return top_idx, top_scores
+
+# ---------------------------
+# Feature extraction from uploaded image
+# ---------------------------
+import torch
+import open_clip
+
+# Load model for site image feature (small, CPU)
+clip_model, _, preprocess = open_clip.create_model_and_transforms(
+    'ViT-B-32-quickgelu',
+    pretrained='openai'
+)
+clip_model = clip_model.to("cpu")
+clip_model.eval()
+
+def get_site_feature(image):
+    image = preprocess(image).unsqueeze(0).to("cpu")
+    with torch.no_grad():
+        feat = clip_model.encode_image(image)
+        feat = feat / feat.norm(dim=-1, keepdim=True)
+    return feat.cpu().numpy().astype("float32")
+
+# ---------------------------
 # Main App
 # ---------------------------
 if uploaded_file:
@@ -154,7 +123,7 @@ if uploaded_file:
     site_image.thumbnail(max_size, Image.LANCZOS)
     st.image(site_image, caption="Uploaded Site Image", use_column_width=False)
 
-    # Determine filtered df
+    # Filter database if needed
     if search_mode == "Filters + Image Search":
         df_filtered = df[
             (df['FixtureType'] == selected_fixture_type) &
@@ -162,14 +131,16 @@ if uploaded_file:
             (df['Wattage'].isin(selected_wattages)) &
             (df['Lumens'].isin(selected_lumens))
         ].reset_index(drop=True)
+        features_filtered = df_filtered[feature_cols].values.astype("float32")
     else:
         df_filtered = df.copy()
+        features_filtered = features
 
     if df_filtered.empty:
         st.warning("No products match the selected filters.")
     else:
-        features = extract_features(df_filtered)
-        indices, scores = search_top_matches(site_image, df_filtered, features, top_k)
+        site_feat = get_site_feature(site_image)
+        indices, scores = search_top_matches(site_feat, features_filtered, top_k)
         matches_df = df_filtered.iloc[indices].copy()
 
         # Energy & LED calculations
@@ -182,21 +153,15 @@ if uploaded_file:
         matches_df['kWhSavings'] = matches_df['ExistingkWh'] - matches_df['ProposedkWh']
         matches_df['kWSavings'] = site_wattage - matches_df['Wattage']
 
-        # Visual column
+        # Visual column using URL
         matches_df['Visual'] = matches_df['ImagePath'].apply(
-            lambda x: f'<img src="data:image/jpeg;base64,{image_to_base64(x)}" width="80">' 
-            if image_to_base64(x) else "N/A"
+            lambda url: f'<img src="{url}" width="80">' if url else "N/A"
         )
 
-        # Display top matches
+        # Display
         cols_order = ['Visual','ItemCode','Brand','Cost','LeadTime','Wattage','Lumens','EquivalentWattage',
                       'EnergySavingWatt','EnergySaving%','ExistingkWh','ProposedkWh','kWhSavings','kWSavings','ProposedAction']
         display_df = matches_df[cols_order]
 
         st.subheader(f"Top {top_k} Visual Matches & Retrofit Analysis")
-        styled_display = display_df.style.set_table_styles(
-            [{'selector': 'th', 'props': [('background-color', '#f4f4f4'),
-                                          ('font-weight', 'bold'),
-                                          ('color', 'black')]}]
-        )
-        st.write(styled_display.to_html(escape=False), unsafe_allow_html=True)
+        st.write(display_df.to_html(escape=False), unsafe_allow_html=True)
